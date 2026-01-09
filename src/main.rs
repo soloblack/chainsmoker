@@ -22,18 +22,24 @@ use log::{info, error};
 struct ConsolePlugin {
     // Track which slots we've seen and who first sent them
     seen_slots: Arc<Mutex<HashSet<u64>>>,
-    // Track first sender (IP and timestamp) for each slot
-    slot_first_sender: Arc<Mutex<HashMap<u64, (std::net::IpAddr, u64)>>>,
+    // Track all senders (IP and timestamp) for each slot
+    slot_senders: Arc<Mutex<HashMap<u64, Vec<(std::net::IpAddr, u64)>>>>,
     // Track statistics: count of new slots per IP address
     ip_stats: Arc<Mutex<HashMap<std::net::IpAddr, u64>>>,
+    // Track time differences: (total_diff_us, count) for average calculation
+    time_diff_stats: Arc<Mutex<(u64, u64)>>, // (total_diff_us, count)
+    // Track which slots we've already calculated time difference for
+    calculated_slots: Arc<Mutex<HashSet<u64>>>,
 }
 
 impl ConsolePlugin {
     fn new() -> Self {
         Self {
             seen_slots: Arc::new(Mutex::new(HashSet::new())),
-            slot_first_sender: Arc::new(Mutex::new(HashMap::new())),
+            slot_senders: Arc::new(Mutex::new(HashMap::new())),
             ip_stats: Arc::new(Mutex::new(HashMap::new())),
+            time_diff_stats: Arc::new(Mutex::new((0, 0))),
+            calculated_slots: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -58,66 +64,115 @@ impl OutputPlugin for ConsolePlugin {
             seen_slots.insert(slot)
         };
 
-        if is_new_slot {
-            // Record the first sender (IP and timestamp) for this slot
-            {
-                let mut slot_first_sender = self.slot_first_sender.lock().unwrap();
-                slot_first_sender.insert(slot, (sender_ip, recv_ts_us));
+        // Always record the sender and timestamp for this slot
+        // For each IP, only keep the earliest timestamp
+        let is_first_sender = {
+            let mut slot_senders = self.slot_senders.lock().unwrap();
+            let senders = slot_senders.entry(slot).or_insert_with(Vec::new);
+            // Check if this IP already sent this slot
+            let existing_index = senders.iter().position(|(ip, _)| *ip == sender_ip);
+            if let Some(idx) = existing_index {
+                // Update to keep the earliest timestamp
+                if recv_ts_us < senders[idx].1 {
+                    senders[idx].1 = recv_ts_us;
+                }
+                false
+            } else {
+                senders.push((sender_ip, recv_ts_us));
+                senders.len() == 1 // First sender for this slot
             }
+        };
 
-            // Update statistics for this IP address
+        if is_new_slot {
+            // Update statistics for this IP address (only count as "new slot" for first sender)
             {
                 let mut ip_stats = self.ip_stats.lock().unwrap();
                 *ip_stats.entry(sender_ip).or_insert(0) += 1;
             }
+        }
 
-            // Log top 2 IP addresses with total slot count and time difference
-            {
-                let seen_slots = self.seen_slots.lock().unwrap();
-                let total_slots = seen_slots.len();
-                drop(seen_slots); // Release lock early
-                
-                let ip_stats = self.ip_stats.lock().unwrap();
-                let mut sorted_stats: Vec<(&std::net::IpAddr, &u64)> = ip_stats.iter().collect();
-                sorted_stats.sort_by(|a, b| b.1.cmp(a.1));
-                
-                let mut log_msg = format!(
-                    "NEW SLOT {} first received from {} | Total new slots: {} | Top 2 IP addresses:",
-                    slot,
-                    sender_ip,
-                    total_slots
-                );
-                
-                // Display top 2 IPs with their counts
-                for (i, (ip, count)) in sorted_stats.iter().take(2).enumerate() {
-                    log_msg.push_str(&format!(" {}. {}: {} new slots", i + 1, ip, count));
+        // Calculate time difference when we have at least 2 senders for this slot (only once per slot)
+        {
+            let mut calculated_slots = self.calculated_slots.lock().unwrap();
+            if !calculated_slots.contains(&slot) {
+                let slot_senders = self.slot_senders.lock().unwrap();
+                if let Some(senders) = slot_senders.get(&slot) {
+                    if senders.len() >= 2 {
+                        // Sort by timestamp to find first and second
+                        let mut sorted_senders = senders.clone();
+                        sorted_senders.sort_by_key(|(_, ts)| *ts);
+                        
+                        let first_ts = sorted_senders[0].1;
+                        let second_ts = sorted_senders[1].1;
+                        let diff_us = second_ts - first_ts; // Time difference in microseconds
+                        
+                        // Mark this slot as calculated
+                        calculated_slots.insert(slot);
+                        drop(slot_senders); // Release lock before acquiring another
+                        
+                        // Update average statistics
+                        {
+                            let mut time_diff_stats = self.time_diff_stats.lock().unwrap();
+                            time_diff_stats.0 += diff_us;
+                            time_diff_stats.1 += 1;
+                        }
+                    }
                 }
-                
-                // Calculate and display time difference between top 2 if both exist
-                if sorted_stats.len() >= 2 {
-                    let top1_ip = sorted_stats[0].0;
-                    let top2_ip = sorted_stats[1].0;
+            }
+        }
+
+        // Log when we have a new slot or when we get a second sender
+        {
+            let slot_senders = self.slot_senders.lock().unwrap();
+            if let Some(senders) = slot_senders.get(&slot) {
+                if is_new_slot || senders.len() == 2 {
+                    let seen_slots = self.seen_slots.lock().unwrap();
+                    let total_slots = seen_slots.len();
+                    drop(seen_slots); // Release lock early
                     
-                    // Find the earliest timestamp for each IP from slot_first_sender
-                    let slot_first_sender = self.slot_first_sender.lock().unwrap();
-                    let mut top1_earliest: Option<u64> = None;
-                    let mut top2_earliest: Option<u64> = None;
+                    let ip_stats = self.ip_stats.lock().unwrap();
+                    let mut sorted_stats: Vec<(&std::net::IpAddr, &u64)> = ip_stats.iter().collect();
+                    sorted_stats.sort_by(|a, b| b.1.cmp(a.1));
                     
-                    for (_, (ip, ts)) in slot_first_sender.iter() {
-                        if ip == top1_ip {
-                            top1_earliest = Some(top1_earliest.map_or(*ts, |e| e.min(*ts)));
-                        } else if ip == top2_ip {
-                            top2_earliest = Some(top2_earliest.map_or(*ts, |e| e.min(*ts)));
+                    let mut log_msg = format!(
+                        "SLOT {} received from {} | Total slots: {} | Senders for this slot: {} | Top 2 IP addresses:",
+                        slot,
+                        sender_ip,
+                        total_slots,
+                        senders.len()
+                    );
+                    
+                    // Display top 2 IPs with their counts
+                    for (i, (ip, count)) in sorted_stats.iter().take(2).enumerate() {
+                        log_msg.push_str(&format!(" {}. {}: {} new slots", i + 1, ip, count));
+                    }
+                    
+                    // Calculate and display time difference if we have at least 2 senders
+                    if senders.len() >= 2 {
+                        let mut sorted_senders = senders.clone();
+                        sorted_senders.sort_by_key(|(_, ts)| *ts);
+                        
+                        let first_ip = sorted_senders[0].0;
+                        let first_ts = sorted_senders[0].1;
+                        let second_ip = sorted_senders[1].0;
+                        let second_ts = sorted_senders[1].1;
+                        let diff_us = second_ts - first_ts;
+                        
+                        log_msg.push_str(&format!(
+                            " | Time diff ({} -> {}): {} us",
+                            first_ip, second_ip, diff_us
+                        ));
+                        
+                        // Display average time difference
+                        let time_diff_stats = self.time_diff_stats.lock().unwrap();
+                        if time_diff_stats.1 > 0 {
+                            let avg_diff_us = time_diff_stats.0 / time_diff_stats.1;
+                            log_msg.push_str(&format!(" | Avg time diff (1st->2nd): {} us (from {} slots)", avg_diff_us, time_diff_stats.1));
                         }
                     }
                     
-                    if let (Some(ts1), Some(ts2)) = (top1_earliest, top2_earliest) {
-                        let diff_us = ts1.abs_diff(ts2);
-                        log_msg.push_str(&format!(" | Time difference between top 2: {} us", diff_us));
-                    }
+                    info!("{}", log_msg);
                 }
-                
-                info!("{}", log_msg);
             }
         }
 
