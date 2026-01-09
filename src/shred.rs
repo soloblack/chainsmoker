@@ -54,20 +54,27 @@
 */
 
 use crate::{stats::ReceiveStats, utils::parse_shred};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use solana_ledger::shred::Shred;
-use std::{net::UdpSocket, sync::Arc, thread, time::Duration};
+use std::{net::{SocketAddr, UdpSocket}, sync::Arc, thread, time::Duration};
 use std::sync::mpsc;
+
+// Structure to carry shred with sender address
+#[derive(Clone)]
+pub struct ShredWithAddr {
+    pub shred: Shred,
+    pub sender_addr: SocketAddr,
+}
 
 pub struct ShredReceiver {
     socket: Arc<UdpSocket>,
-    sender: mpsc::Sender<Shred>,
-    receiver: Option<mpsc::Receiver<Shred>>,
+    sender: mpsc::Sender<ShredWithAddr>,
+    receiver: Option<mpsc::Receiver<ShredWithAddr>>,
 }
 
 impl ShredReceiver {
     pub fn new(socket: Arc<UdpSocket>) -> Self {
-        let (sender, receiver) = mpsc::channel::<Shred>();
+        let (sender, receiver) = mpsc::channel::<ShredWithAddr>();
 
         if let Err(e) = socket.set_nonblocking(false) {
             error!("Failed to set socket blocking: {}", e);
@@ -80,10 +87,10 @@ impl ShredReceiver {
         }
     }
 
-    fn process_packet(data: &[u8], sender_addr: std::net::SocketAddr, count: u64) -> Option<Shred> {
+    fn process_packet(data: &[u8], sender_addr: SocketAddr, count: u64) -> Option<ShredWithAddr> {
         match parse_shred(data) {
             Ok(shred) => {
-                info!(
+                debug!(
                     "SHRED #{}: Slot:{} Index:{} Type:{:?} from {}",
                     count,
                     shred.slot(),
@@ -92,10 +99,13 @@ impl ShredReceiver {
                     sender_addr
                 );
 
-                Some(shred)
+                Some(ShredWithAddr {
+                    shred,
+                    sender_addr,
+                })
             }
             Err(_) => {
-                debug!(
+                warn!(
                     "NON-SHRED #{}: {} bytes from {}",
                     count,
                     data.len(),
@@ -142,7 +152,7 @@ impl ShredReceiver {
         })
     }
 
-    pub fn take_receiver(&mut self) -> mpsc::Receiver<Shred> {
+    pub fn take_receiver(&mut self) -> mpsc::Receiver<ShredWithAddr> {
         self.receiver.take().expect("Receiver already taken")
     }
 }

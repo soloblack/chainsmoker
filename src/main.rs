@@ -6,15 +6,36 @@ use std::{
 };
 
 use chainsmoker::{
-    Keypair, Shred,
+    Keypair, ShredWithAddr,
     gossip::GossipNode,
     output::{OutputPlugin, PluginRunner},
     shred::ShredReceiver,
     types::Network,
 };
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+};
 
 // simple console plugin can be grpc/quinn but just console as example
-struct ConsolePlugin;
+struct ConsolePlugin {
+    // Track which slots we've seen and who first sent them
+    seen_slots: Arc<Mutex<HashSet<u64>>>,
+    // Track first sender for each slot
+    slot_first_sender: Arc<Mutex<HashMap<u64, std::net::SocketAddr>>>,
+    // Track statistics: count of new slots per address
+    addr_stats: Arc<Mutex<HashMap<std::net::SocketAddr, u64>>>,
+}
+
+impl ConsolePlugin {
+    fn new() -> Self {
+        Self {
+            seen_slots: Arc::new(Mutex::new(HashSet::new())),
+            slot_first_sender: Arc::new(Mutex::new(HashMap::new())),
+            addr_stats: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl OutputPlugin for ConsolePlugin {
@@ -23,13 +44,53 @@ impl OutputPlugin for ConsolePlugin {
         Ok(())
     }
 
-    async fn handle_shred(&mut self, shred: Shred) -> Result<(), Box<dyn std::error::Error>> {
-        println!(
-            "[Plugin] Shred: Slot:{} Index:{} Type:{:?}",
-            shred.slot(),
-            shred.index(),
-            shred.shred_type()
-        );
+    async fn handle_shred(&mut self, shred_with_addr: ShredWithAddr) -> Result<(), Box<dyn std::error::Error>> {
+        let shred = &shred_with_addr.shred;
+        let sender_addr = shred_with_addr.sender_addr;
+        let slot = shred.slot();
+
+        // Check if this is a new slot
+        let is_new_slot = {
+            let mut seen_slots = self.seen_slots.lock().unwrap();
+            seen_slots.insert(slot)
+        };
+
+        if is_new_slot {
+            // Record the first sender for this slot
+            {
+                let mut slot_first_sender = self.slot_first_sender.lock().unwrap();
+                slot_first_sender.insert(slot, sender_addr);
+            }
+
+            // Update statistics for this address
+            {
+                let mut addr_stats = self.addr_stats.lock().unwrap();
+                *addr_stats.entry(sender_addr).or_insert(0) += 1;
+            }
+
+            // Print top 5 addresses with total slot count
+            {
+                let seen_slots = self.seen_slots.lock().unwrap();
+                let total_slots = seen_slots.len();
+                drop(seen_slots); // Release lock early
+                
+                let addr_stats = self.addr_stats.lock().unwrap();
+                let mut sorted_stats: Vec<(&std::net::SocketAddr, &u64)> = addr_stats.iter().collect();
+                sorted_stats.sort_by(|a, b| b.1.cmp(a.1));
+                
+                println!(
+                    "[Plugin] NEW SLOT {} first received from {} | Total new slots: {} | Top 5 addresses:",
+                    slot,
+                    sender_addr,
+                    total_slots
+                );
+                
+                for (i, (addr, count)) in sorted_stats.iter().take(5).enumerate() {
+                    println!("  {}. {}: {} new slots", i + 1, addr, count);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -91,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _shred_handle = shred_receiver.start(); // Start receiving
 
     let mut plugin_runner = PluginRunner::new();
-    plugin_runner.add_plugin(Box::new(ConsolePlugin));
+    plugin_runner.add_plugin(Box::new(ConsolePlugin::new()));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async move {
@@ -109,8 +170,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
 
             match shred_result {
-                Ok(Ok(shred)) => {
-                    plugin_runner.handle_shred(shred).await;
+                Ok(Ok(shred_with_addr)) => {
+                    plugin_runner.handle_shred(shred_with_addr).await;
                 }
                 Ok(Err(std::sync::mpsc::RecvTimeoutError::Timeout)) => {
                     continue;

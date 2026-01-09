@@ -8,3 +8,4 @@ pub mod utils;
 // commonly use types
 pub use solana_ledger::shred::Shred;
 pub use solana_sdk::signer::keypair::Keypair;
+pub use shred::ShredWithAddr;

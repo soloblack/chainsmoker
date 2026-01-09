@@ -66,12 +66,12 @@
 */
 
 use log::{info, warn};
-use solana_ledger::shred::Shred;
+use crate::shred::ShredWithAddr;
 
 #[async_trait::async_trait]
 pub trait OutputPlugin: Send + Sync {
     async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>>;
-    async fn handle_shred(&mut self, shred: Shred) -> Result<(), Box<dyn std::error::Error>>;
+    async fn handle_shred(&mut self, shred_with_addr: ShredWithAddr) -> Result<(), Box<dyn std::error::Error>>;
     async fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>>;
     fn name(&self) -> &str;
 }
@@ -99,9 +99,9 @@ impl PluginRunner {
         Ok(())
     }
 
-    pub async fn handle_shred(&mut self, shred: Shred) {
+    pub async fn handle_shred(&mut self, shred_with_addr: ShredWithAddr) {
         for plugin in &mut self.plugins {
-            if let Err(e) = plugin.handle_shred(shred.clone()).await {
+            if let Err(e) = plugin.handle_shred(shred_with_addr.clone()).await {
                 warn!("Plugin {} error: {}", plugin.name(), e);
             }
         }
