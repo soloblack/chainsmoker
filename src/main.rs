@@ -1,4 +1,5 @@
 use std::{
+    env,
     net::{IpAddr, UdpSocket},
     sync::Arc,
     time::Duration,
@@ -45,12 +46,31 @@ impl OutputPlugin for ConsolePlugin {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     solana_logger::setup_with_default("chainsmoker=info,solana_gossip=warn,solana_metrics=error");
 
-    let bind_address: IpAddr = "64.34.80.45".parse().unwrap();
+    // Read configuration from environment variables
+    let bind_address: IpAddr = env::var("BIND_ADDRESS")
+        .map_err(|_| "BIND_ADDRESS environment variable is required")?
+        .parse()
+        .map_err(|e| format!("Invalid BIND_ADDRESS: {}", e))?;
+
+    let gossip_port: u16 = env::var("GOSSIP_PORT")
+        .unwrap_or_else(|_| "8000".to_string())
+        .parse()
+        .map_err(|e| format!("Invalid GOSSIP_PORT: {}", e))?;
+
+    let tvu_port: u16 = env::var("TVU_PORT")
+        .unwrap_or_else(|_| "8001".to_string())
+        .parse()
+        .map_err(|e| format!("Invalid TVU_PORT: {}", e))?;
+
+    println!("Configuration:");
+    println!("  BIND_ADDRESS: {}", bind_address);
+    println!("  GOSSIP_PORT: {}", gossip_port);
+    println!("  TVU_PORT: {}", tvu_port);
 
     let identity_keypair = Arc::new(Keypair::new());
 
-    let gossip_socket = UdpSocket::bind((bind_address, 8000))?;
-    let tvu_socket = UdpSocket::bind((bind_address, 8001))?;
+    let gossip_socket = UdpSocket::bind((bind_address, gossip_port))?;
+    let tvu_socket = UdpSocket::bind((bind_address, tvu_port))?;
 
     let gossip_node = GossipNode::new(
         identity_keypair,
