@@ -16,15 +16,16 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Mutex,
 };
+use log::{info, error};
 
 // simple console plugin can be grpc/quinn but just console as example
 struct ConsolePlugin {
     // Track which slots we've seen and who first sent them
     seen_slots: Arc<Mutex<HashSet<u64>>>,
-    // Track first sender for each slot
-    slot_first_sender: Arc<Mutex<HashMap<u64, std::net::SocketAddr>>>,
-    // Track statistics: count of new slots per address
-    addr_stats: Arc<Mutex<HashMap<std::net::SocketAddr, u64>>>,
+    // Track first sender (IP and timestamp) for each slot
+    slot_first_sender: Arc<Mutex<HashMap<u64, (std::net::IpAddr, u64)>>>,
+    // Track statistics: count of new slots per IP address
+    ip_stats: Arc<Mutex<HashMap<std::net::IpAddr, u64>>>,
 }
 
 impl ConsolePlugin {
@@ -32,7 +33,7 @@ impl ConsolePlugin {
         Self {
             seen_slots: Arc::new(Mutex::new(HashSet::new())),
             slot_first_sender: Arc::new(Mutex::new(HashMap::new())),
-            addr_stats: Arc::new(Mutex::new(HashMap::new())),
+            ip_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -40,14 +41,16 @@ impl ConsolePlugin {
 #[async_trait::async_trait]
 impl OutputPlugin for ConsolePlugin {
     async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Console plugin started");
+        info!("Console plugin started");
         Ok(())
     }
 
     async fn handle_shred(&mut self, shred_with_addr: ShredWithAddr) -> Result<(), Box<dyn std::error::Error>> {
         let shred = &shred_with_addr.shred;
         let sender_addr = shred_with_addr.sender_addr;
+        let sender_ip = sender_addr.ip(); // Extract IP address, remove port
         let slot = shred.slot();
+        let recv_ts_us = shred_with_addr.recv_ts_us;
 
         // Check if this is a new slot
         let is_new_slot = {
@@ -56,38 +59,65 @@ impl OutputPlugin for ConsolePlugin {
         };
 
         if is_new_slot {
-            // Record the first sender for this slot
+            // Record the first sender (IP and timestamp) for this slot
             {
                 let mut slot_first_sender = self.slot_first_sender.lock().unwrap();
-                slot_first_sender.insert(slot, sender_addr);
+                slot_first_sender.insert(slot, (sender_ip, recv_ts_us));
             }
 
-            // Update statistics for this address
+            // Update statistics for this IP address
             {
-                let mut addr_stats = self.addr_stats.lock().unwrap();
-                *addr_stats.entry(sender_addr).or_insert(0) += 1;
+                let mut ip_stats = self.ip_stats.lock().unwrap();
+                *ip_stats.entry(sender_ip).or_insert(0) += 1;
             }
 
-            // Print top 5 addresses with total slot count
+            // Log top 2 IP addresses with total slot count and time difference
             {
                 let seen_slots = self.seen_slots.lock().unwrap();
                 let total_slots = seen_slots.len();
                 drop(seen_slots); // Release lock early
                 
-                let addr_stats = self.addr_stats.lock().unwrap();
-                let mut sorted_stats: Vec<(&std::net::SocketAddr, &u64)> = addr_stats.iter().collect();
+                let ip_stats = self.ip_stats.lock().unwrap();
+                let mut sorted_stats: Vec<(&std::net::IpAddr, &u64)> = ip_stats.iter().collect();
                 sorted_stats.sort_by(|a, b| b.1.cmp(a.1));
                 
-                println!(
-                    "[Plugin] NEW SLOT {} first received from {} | Total new slots: {} | Top 5 addresses:",
+                let mut log_msg = format!(
+                    "NEW SLOT {} first received from {} | Total new slots: {} | Top 2 IP addresses:",
                     slot,
-                    sender_addr,
+                    sender_ip,
                     total_slots
                 );
                 
-                for (i, (addr, count)) in sorted_stats.iter().take(5).enumerate() {
-                    println!("  {}. {}: {} new slots", i + 1, addr, count);
+                // Display top 2 IPs with their counts
+                for (i, (ip, count)) in sorted_stats.iter().take(2).enumerate() {
+                    log_msg.push_str(&format!(" {}. {}: {} new slots", i + 1, ip, count));
                 }
+                
+                // Calculate and display time difference between top 2 if both exist
+                if sorted_stats.len() >= 2 {
+                    let top1_ip = sorted_stats[0].0;
+                    let top2_ip = sorted_stats[1].0;
+                    
+                    // Find the earliest timestamp for each IP from slot_first_sender
+                    let slot_first_sender = self.slot_first_sender.lock().unwrap();
+                    let mut top1_earliest: Option<u64> = None;
+                    let mut top2_earliest: Option<u64> = None;
+                    
+                    for (_, (ip, ts)) in slot_first_sender.iter() {
+                        if ip == top1_ip {
+                            top1_earliest = Some(top1_earliest.map_or(*ts, |e| e.min(*ts)));
+                        } else if ip == top2_ip {
+                            top2_earliest = Some(top2_earliest.map_or(*ts, |e| e.min(*ts)));
+                        }
+                    }
+                    
+                    if let (Some(ts1), Some(ts2)) = (top1_earliest, top2_earliest) {
+                        let diff_us = ts1.abs_diff(ts2);
+                        log_msg.push_str(&format!(" | Time difference between top 2: {} us", diff_us));
+                    }
+                }
+                
+                info!("{}", log_msg);
             }
         }
 
@@ -95,7 +125,7 @@ impl OutputPlugin for ConsolePlugin {
     }
 
     async fn stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Console plugin stopped");
+        info!("Console plugin stopped");
         Ok(())
     }
 
@@ -123,27 +153,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .map_err(|e| format!("Invalid TVU_PORT: {}", e))?;
 
-    println!("Configuration:");
-    println!("  BIND_ADDRESS: {}", bind_address);
-    println!("  GOSSIP_PORT: {}", gossip_port);
-    println!("  TVU_PORT: {}", tvu_port);
+    // Check if gossip service should be enabled
+    let enable_gossip = env::var("ENABLE_GOSSIP")
+        .unwrap_or_else(|_| "true".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+
+    info!("Configuration:");
+    info!("  BIND_ADDRESS: {}", bind_address);
+    info!("  GOSSIP_PORT: {}", gossip_port);
+    info!("  TVU_PORT: {}", tvu_port);
+    info!("  ENABLE_GOSSIP: {}", enable_gossip);
 
     let identity_keypair = Arc::new(Keypair::new());
 
-    let gossip_socket = UdpSocket::bind((bind_address, gossip_port))?;
     let tvu_socket = UdpSocket::bind((bind_address, tvu_port))?;
 
-    let gossip_node = GossipNode::new(
-        identity_keypair,
-        gossip_socket,
-        &tvu_socket,
-        bind_address,
-        Network::Mainnet,
-    )?;
+    // Only start gossip service if enabled
+    if enable_gossip {
+        let gossip_socket = UdpSocket::bind((bind_address, gossip_port))?;
+        let gossip_node = GossipNode::new(
+            identity_keypair,
+            gossip_socket,
+            &tvu_socket,
+            bind_address,
+            Network::Mainnet,
+        )?;
 
-    gossip_node.start_discovery(); // breaks when peers > 100
-
-    println!("finished discovering");
+        gossip_node.start_discovery(); // breaks when peers > 100
+        info!("Finished gossip discovery");
+    } else {
+        info!("Gossip service disabled, skipping discovery");
+    }
 
     let mut shred_receiver = ShredReceiver::new(Arc::new(tvu_socket));
 
@@ -177,11 +218,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 Ok(Err(std::sync::mpsc::RecvTimeoutError::Disconnected)) => {
-                    println!("Shred receiver channel disconnected");
+                    error!("Shred receiver channel disconnected");
                     break;
                 }
                 Err(_) => {
-                    println!("Error in shred receiver task");
+                    error!("Error in shred receiver task");
                     break;
                 }
             }

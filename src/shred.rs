@@ -53,7 +53,7 @@
 ! Max size for shred packet is 1228 bytes (Legacy) or 1203 bytes (Merkle).
 */
 
-use crate::{stats::ReceiveStats, utils::parse_shred};
+use crate::{stats::ReceiveStats, utils::{get_timestamp_us, parse_shred}};
 use log::{debug, error, info, warn};
 use solana_ledger::shred::Shred;
 use std::{net::{SocketAddr, UdpSocket}, sync::Arc, thread, time::Duration};
@@ -62,6 +62,7 @@ use std::sync::mpsc;
 // Structure to carry shred with sender address
 #[derive(Clone)]
 pub struct ShredWithAddr {
+    pub recv_ts_us: u64,
     pub shred: Shred,
     pub sender_addr: SocketAddr,
 }
@@ -87,7 +88,7 @@ impl ShredReceiver {
         }
     }
 
-    fn process_packet(data: &[u8], sender_addr: SocketAddr, count: u64) -> Option<ShredWithAddr> {
+    fn process_packet(data: &[u8], sender_addr: SocketAddr, count: u64, recv_ts_us: u64) -> Option<ShredWithAddr> {
         match parse_shred(data) {
             Ok(shred) => {
                 debug!(
@@ -100,6 +101,7 @@ impl ShredReceiver {
                 );
 
                 Some(ShredWithAddr {
+                    recv_ts_us,
                     shred,
                     sender_addr,
                 })
@@ -129,10 +131,11 @@ impl ShredReceiver {
             loop {
                 match socket.recv_from(&mut buffer) {
                     Ok((size, sender_addr)) => {
+                        let recv_ts_us = get_timestamp_us();
                         stats.increment();
 
                         if let Some(shred_data) =
-                            Self::process_packet(&buffer[..size], sender_addr, stats.count)
+                            Self::process_packet(&buffer[..size], sender_addr, stats.count, recv_ts_us)
                         {
                             // CHANGED: Use std::sync::mpsc send() instead of tokio
                             if sender.send(shred_data).is_err() {

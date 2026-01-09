@@ -7,6 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+
+
 pub fn resolve_entrypoints(
     network: Network,
 ) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error>> {
@@ -101,6 +103,13 @@ pub fn log_peer_details(peers: &[(ContactInfo, u64)], tpu_peers: &[ContactInfo],
 pub fn parse_shred(data: &[u8]) -> Result<Shred, Box<dyn std::error::Error>> {
     let shred = Shred::new_from_serialized_shred(data.to_vec())?;
     Ok(shred)
+}
+
+pub fn get_timestamp_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
 }
 
 pub fn get_timestamp() -> u64 {
