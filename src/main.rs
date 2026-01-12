@@ -18,6 +18,7 @@ use std::{
 };
 use log::{info, error};
 
+const SHRED_VERSION: u16 = 50093;
 // simple console plugin can be grpc/quinn but just console as example
 struct ConsolePlugin {
     // Track which slots we've seen and who first sent them
@@ -241,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Gossip service disabled, skipping discovery");
     }
 
-    let mut shred_receiver = ShredReceiver::new(Arc::new(tvu_socket));
+    let mut shred_receiver = ShredReceiver::new(Arc::new(tvu_socket), SHRED_VERSION);
 
     // get the receiver BEFORE starting the sender thread to prevent race condition
     let receiver = shred_receiver.take_receiver();

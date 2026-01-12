@@ -71,10 +71,11 @@ pub struct ShredReceiver {
     socket: Arc<UdpSocket>,
     sender: mpsc::Sender<ShredWithAddr>,
     receiver: Option<mpsc::Receiver<ShredWithAddr>>,
+    shred_version: u16,
 }
 
 impl ShredReceiver {
-    pub fn new(socket: Arc<UdpSocket>) -> Self {
+    pub fn new(socket: Arc<UdpSocket>, shred_version: u16) -> Self {
         let (sender, receiver) = mpsc::channel::<ShredWithAddr>();
 
         if let Err(e) = socket.set_nonblocking(false) {
@@ -85,6 +86,7 @@ impl ShredReceiver {
             socket,
             sender,
             receiver: Some(receiver), 
+            shred_version,
         }
     }
 
@@ -121,13 +123,13 @@ impl ShredReceiver {
     pub fn start(&mut self) -> thread::JoinHandle<()> {
         let socket = self.socket.clone();
         let sender = self.sender.clone();
-
+        let shred_version = self.shred_version;
         thread::spawn(move || {
             info!("Starting shred receiver...");
 
             let mut buffer = [0u8; 1232];
             let mut stats = ReceiveStats::new();
-            let mut deshred_manager = DeshredManager::new();
+            let mut deshred_manager = DeshredManager::new(shred_version);
 
             loop {
                 match socket.recv_from(&mut buffer) {

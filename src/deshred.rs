@@ -131,14 +131,16 @@ pub struct DeshredManager {
     // use fixed-size array indexed by slot % WINDOW_SIZE
     slots: [Option<ShrdsCompact>; SLOT_WINDOW_SIZE],
     current_slot: AtomicU64,
+    shred_version: u16,
 }
 
 
 impl DeshredManager {
-    pub fn new() -> Self {
+    pub fn new(shred_version: u16) -> Self {
         Self {
             slots: std::array::from_fn(|_| None),
             current_slot: AtomicU64::new(0),
+            shred_version,
         }
     }
 
@@ -159,7 +161,7 @@ impl DeshredManager {
             Some(s) if s.slot == slot => s,
             slot_entry => {
                 // replace with new slot
-                *slot_entry = Some(ShrdsCompact::new(slot, shred.version()));
+                *slot_entry = Some(ShrdsCompact::new(slot, self.shred_version));
                 slot_entry.as_mut().unwrap()
             }
         };
