@@ -53,7 +53,7 @@
 ! Max size for shred packet is 1228 bytes (Legacy) or 1203 bytes (Merkle).
 */
 
-use crate::{stats::ReceiveStats, utils::{get_timestamp_us, parse_shred}};
+use crate::{deshred::DeshredManager, stats::ReceiveStats, utils::{get_timestamp_us, parse_shred}};
 use log::{debug, error, info, warn};
 use solana_ledger::shred::Shred;
 use std::{net::{SocketAddr, UdpSocket}, sync::Arc, thread, time::Duration};
@@ -127,6 +127,7 @@ impl ShredReceiver {
 
             let mut buffer = [0u8; 1232];
             let mut stats = ReceiveStats::new();
+            let mut deshred_manager = DeshredManager::new();
 
             loop {
                 match socket.recv_from(&mut buffer) {
@@ -138,9 +139,13 @@ impl ShredReceiver {
                             Self::process_packet(&buffer[..size], sender_addr, stats.count, recv_ts_us)
                         {
                             // CHANGED: Use std::sync::mpsc send() instead of tokio
-                            if sender.send(shred_data).is_err() {
-                                error!("Output channel closed, stopping receiver");
-                                break;
+                            if let Some((slot, entries, payload)) = deshred_manager.add_shred(shred_data.shred) {
+                                info!("Deshredded slot: {} entries: {} payload: {}", slot, entries.len(), payload.len());
+                                for entry in entries {
+                                    for tx in entry.transactions {
+                                        info!("Transaction: {tx:?}");
+                                    }
+                                }
                             }
                         }
 

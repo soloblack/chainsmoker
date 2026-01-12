@@ -998,7 +998,9 @@ name = "chainsmoker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bincode",
  "log",
+ "solana-entry",
  "solana-gossip",
  "solana-ledger",
  "solana-logger",
